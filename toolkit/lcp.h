@@ -66,44 +66,6 @@ class MatrixPermutation {
 };
 
 //***************************************************************************
-// LinearReducer.
-// This maintains a factorization of a top left submatrix of the matrix A. The
-// factorization is of all (original) indexes that are in the "index set".
-// Allow rows to be swapped in to and out of this factorization. Only the lower
-// triangle of A is ever accessed. A is permuted in place.
-
-class LinearReducer : public MatrixPermutation {
- public:
-  LinearReducer(MatrixXd &A, const VectorXd &b);
-
-  // Is (original, not permuted) index i in the index set?
-  bool HasIndex(int i) const;
-
-  // Add or remove (original, not permuted) indexes from the index set.
-  void AddIndex(int i);
-  void RemoveIndex(int i);
-
-  // Solve a sub-problem in A. Solve A*x=b for x, with x(~index_set) forced to
-  // the 'clamp' values in c(~index_set) by adjusting b(~index_set). When c=0
-  // this is equivalent to solving the principal subproblem:
-  // A(index_set,index_set)*x(index_set) = b(index_set)
-  void SubSolve(const VectorXd &c, VectorXd *x);
-
-  // Compute b = A*x. The b vector is only filled in for indexes *not* in the
-  // index set.
-  void MultiplyA(const VectorXd &x, VectorXd *b) const;
-
- private:
-  VectorXd x_;    // Solution of A*x = b, permuted by perm_
-  MatrixXd L_;    // Cholesky factorization of Aii (top/left of A in index set)
-  int index_;     // All permuted indexes < index_ are in the index set
-
-  void SwapRowsAndColumns(int i, int j);
-
-  DISALLOW_COPY_AND_ASSIGN(LinearReducer);
-};
-
-//***************************************************************************
 // LCP.
 
 // Use the Murty principal pivoting method to solve the LCP problem A*x=b+w,
@@ -150,13 +112,13 @@ struct Settings {
   // The algorithm to use.
   Algorithm algorithm = MURTY;
 
-  // If true, solve the box LCP problem. Vectors lo and hi must be valid. If
-  // false, this is equivalent to lo=0 and hi=infinity.
-  bool box_lcp = true;
-
   // Use a Schur complement approach to speed up solutions where large numbers
   // of unbounded variables are present (i.e. lo=-infinity, hi=infinity).
   bool schur_complement = true;
+
+  // If nonzero, the LCP result will be checked for correctness to this
+  // tolerance.
+  double test_tolerance = 0;
 
   // Maximum number of solver iterations to run before giving up and returning
   // false. However it is often not possible to know what a reasonable limit

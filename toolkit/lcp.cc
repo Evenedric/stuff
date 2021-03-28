@@ -53,14 +53,16 @@ inline void Cholesky(MatrixXd *A_and_L) {
 // Solve in place: L*x = b, regarding just the top left n*n block of L. Only
 // the lower triangle of L is read.
 inline void LSolve(const MatrixXd &L, int n, VectorXd *x_and_b) {
-  L.block(0, 0, n, n).triangularView<Eigen::Lower>().solveInPlace(*x_and_b);
+  Eigen::Map<VectorXd> xb(x_and_b->data(), n);
+  L.block(0, 0, n, n).triangularView<Eigen::Lower>().solveInPlace(xb);
 }
 
 // Solve in place: L'*x = b, regarding just the top left n*n block of L. Only
 // the lower triangle of L is read.
 inline void LTSolve(const MatrixXd &L, int n, VectorXd *x_and_b) {
+  Eigen::Map<VectorXd> xb(x_and_b->data(), n);
   L.block(0, 0, n, n).adjoint().triangularView<Eigen::Upper>()
-    .solveInPlace(*x_and_b);
+    .solveInPlace(xb);
 }
 
 // Solve L*L'*x = b, regarding just the top left n*n block of L. Only the lower
@@ -208,229 +210,131 @@ void MatrixPermutation::Unpermute(const VectorXd &in, VectorXd *out,
 }
 
 //***************************************************************************
-// LinearReducer.
-
-LinearReducer::LinearReducer(MatrixXd &A, const VectorXd &b)
-    : MatrixPermutation(A) {
-  index_ = A.rows();
-
-  // Factor A into L_, solve for x_.
-  L_.resize(A.rows(), A.cols());
-  L_.triangularView<Eigen::Lower>() = A.triangularView<Eigen::Lower>();
-  Cholesky(&L_);
-  x_ = b;
-  LLTSolve(L_, L_.rows(), &x_);
-}
-
-bool LinearReducer::HasIndex(int i) const {
-  return PermutedIndexOf(i) < index_;
-}
-
-void LinearReducer::AddIndex(int i) {
-  i = PermutedIndexOf(i);
-  if (i >= index_) {
-    SwapRowsAndColumns(index_, i);
-    index_++;
-    // Update the factorization.
-    AddCholeskyRow(A_, index_, &L_);
-  }
-}
-
-void LinearReducer::RemoveIndex(int i) {
-  i = PermutedIndexOf(i);
-  if (i < index_) {
-    SwapCholeskyRows(A_, i, index_, &L_);
-    index_--;
-    SwapRowsAndColumns(index_, i);
-  }
-}
-
-void LinearReducer::SubSolve(const VectorXd &c, VectorXd *x) {
-  // Partitioning the variables of the A*x=b matrix equation (with i=index_set,
-  // n=~index_set) gives:
-  //   [ Aii Ain ] [ xi ] = [ bi ]
-  //   [ Ani Ann ] [ xn ] = [ bn ]
-  // We want to add something to bn to force xn to cn, and then determine the
-  // effect on xi. Let's say we have a solution Ei,En of:
-  //   [ Aii Ain ] [ Ei ] = [ 0 ]       (eq. 1)
-  //   [ Ani Ann ] [ En ] = [ I ]  <-- I is the identity matrix
-  // Multiplying this on the right by a vector k gives:
-  //   [ Aii Ain ] [ Ei*k ] = [ 0 ]
-  //   [ Ani Ann ] [ En*k ] = [ k ]
-  // Adding the above to our original A*x=b solution gives:
-  //   [ Aii Ain ] [ xi + Ei*k ] = [ bi     ]
-  //   [ Ani Ann ] [ xn + En*k ] = [ bn + k ]
-  // So we need to solve for k to satisfy: xn + En*k = cn. Once we have that we
-  // can compute new_xi = xi + Ei*k = xi + Ei*inv(En)*(cn - xn).
-  // From eq. 1 we have
-  //   Ei = -inv(Aii)*Ain*En
-  // so
-  //   new_xi = xi - inv(Aii)*Ain*En*inv(En)*(cn - xn).
-  //          = xi - inv(Aii)*Ain*(cn - xn).
-
-  // Handle the easy cases.
-  int n = A_.rows();
-  if (index_ == 0) {            // An easy case, all x values clamped
-    *x = c;
-    return;
-  } else if (index_ >= n) {     // An easy case, no x values clamped
-    x->resize(n);
-    Unpermute(x_, x);
-    return;
-  }
-
-  // Permute c to match our A.
-  VectorXd c2(n);
-  Permute(c, &c2);
-
-  // Compute xi -= inv(Aii) Ain (cn - xn)
-  VectorXd newx_head = A_.block(index_, 0, n - index_, index_).transpose() *
-                       (c2.tail(n - index_) - x_.tail(n - index_));
-  LLTSolve(L_, index_, &newx_head);
-
-  // Unpermute.
-  x->resize(n);
-  for (int i = 0; i < index_; i++) {
-    (*x)[OriginalIndexOf(i)] = x_[i] - newx_head[i];
-  }
-  for (int i = index_; i < n; i++) {
-    (*x)[OriginalIndexOf(i)] = c[OriginalIndexOf(i)];
-  }
-}
-
-void LinearReducer::MultiplyA(const VectorXd &x, VectorXd *b) const {
-  int n = A_.rows();
-  if (index_ >= n) {
-    // No indexes not in the index set, nothing to do, but caller will still
-    // expect an allocated 'b' vector.
-    b->resize(n);
-    return;
-  }
-
-  // Permute x to match our A.
-  VectorXd x2(n);
-  Permute(x, &x2);
-
-  // Do the multiplication, but only for indexes not in the index set.
-  VectorXd b2(n);
-  b2.tail(n - index_) = A_.block(index_, 0, n - index_, index_) * x2.head(index_) +
-      A_.block(index_, index_, n - index_, n - index_).selfadjointView<Eigen::Lower>()
-       * x2.tail(n - index_);
-
-  // Unpermute (indexes not in the index set only).
-  b->resize(n);
-  Unpermute(b2, b, index_);
-}
-
-void LinearReducer::SwapRowsAndColumns(int i, int j) {
-  MatrixPermutation::SwapRowsAndColumns(i, j);
-  std::swap(x_[i], x_[j]);
-}
-
-//***************************************************************************
 // LCP.
 
-bool SolveLCP_Murty(const Settings &settings,
-                    MatrixXd &A, const VectorXd &b,
-                    VectorXd *x, VectorXd *w) {
+bool SolveLCP_BoxMurty(const Settings &settings,
+                       MatrixXd &A, const VectorXd &b_arg,
+                       const VectorXd &lo_arg, const VectorXd &hi_arg,
+                       VectorXd *x_arg, VectorXd *w_arg) {
+  // If lo=0 and hi=infinity this code can be simplified quite a bit, and
+  // the x update at the start of each iteration can be twice as fast by
+  // observing that if we add a row/column to an A x = b problem:
+  //   [ A  a ] [ x1 ] = [ L  0 ] [ L' l ] [ x1 ] = [ b1 ]
+  //   [ a' c ] [ x2 ] = [ l' e ] [ 0  e ] [ x2 ]   [ b2 ]
+  // and we know oldx1 = inv(A) b1, the x1,x2 can be computed from
+  //   x2 = (b2 - a' oldx1) / e^2
+  //   x1 = oldx1 - inv(L') l x2
+  // (and similarly for removing a row/column). This speeds things up a little,
+  // but the result is still not competitive with BoxDantzig, so we don't
+  // actually implement this.
+  //
+  // This can not handle unbounded variables with lo=-infinity and hi=infinity,
+  // because of the way that x is initialized. It is assumed that unbounded
+  // variables will be handled with a Schur complement method.
+
   int n = A.rows();
-  LinearReducer reducer(A, b);
-  VectorXd c(n);            // Clamp values, which will always be zero
-  c.setZero();
 
-  // The reducer index set is the indexes that are nonzero in x. This is
-  // initially all indexes.
-  for (int iteration = 0; iteration < settings.max_iterations; iteration++) {
-    // Compute x for this index set.
-    reducer.SubSolve(c, x);
+  // Permute A, b, lo, hi as we go.
+  MatrixPermutation Aperm(A);
+  VectorXd b = b_arg;
+  VectorXd lo = lo_arg;
+  VectorXd hi = hi_arg;
 
-    // Compute w = A*x - b. This doesn't compute elements of w that are known
-    // to be zero.
-    reducer.MultiplyA(*x, w);
-    for (int i = 0; i < n; i++) {
-      if (reducer.HasIndex(i)) {
-        (*w)[i] = 0;
-      } else {
-        (*w)[i] -= b[i];
-      }
-    }
+  // The factorization of Aperm that we build as we go.
+  MatrixXd L(n, n);
 
-    // Check to see if we have a solution. If not, add or remove an index from
-    // the index set and try again.
-    for (int i = 0; i < n; i++) {
-      if (reducer.HasIndex(i) && ((*x)[i] < 0 || (*w)[i] > 0)) {
-        reducer.RemoveIndex(i);
-        goto retry;
-      }
-      if (!reducer.HasIndex(i) && ((*x)[i] > 0 || (*w)[i] < 0)) {
-        reducer.AddIndex(i);
-        goto retry;
-      }
-    }
+  // 'index' is the size of the top left matrix in A that is currently
+  // factorized into L. Indexes 0..index-1 are where w=0 and x is free.
+  // Indexes index..i-1 are where w can take any value and x is clamped.
+  int index = 0;
 
-    // We have a correct solution.
-    return true;
-   retry:;
+  // Initialize x. We can not put 'infinity' values here because they will
+  // multiply other things and cause a mess.
+  VectorXd x(n);
+  for (int i = 0; i < n; i++) {
+    if (lo[i] > -__DBL_MAX__)
+      x[i] = lo[i];
+    else if (hi[i] < __DBL_MAX__)
+      x[i] = hi[i];
+    else
+      Panic("This can not handle unbounded variables");
   }
 
-  // We exceeded the maximum number of iterations.
-  return false;
-}
-
-bool SolveLCP_BoxMurty(const Settings &settings,
-                       MatrixXd &A, const VectorXd &b,
-                       const VectorXd &lo, const VectorXd &hi,
-                       VectorXd *x, VectorXd *w) {
-  int n = A.rows();
-  LinearReducer reducer(A, b);
-
-  // The reducer index set is the indexes where w=0 and lo<x<hi. This is
-  // initially all indexes.
-  VectorXd c(n);      // Clamp vector
-  c.setZero();
+  VectorXd xhead, wtail;
+  VectorXd BCx2 = A.selfadjointView<Eigen::Lower>() * x;
   for (int iteration = 0; iteration < settings.max_iterations; iteration++) {
-    // Compute x for this index set.
-    reducer.SubSolve(c, x);
+    // Each iteration we solve the problem
+    //   [ A B' ] [ x1 ] = [ b1 ] + [ 0  ]    (A is index x index)
+    //   [ B C  ] [ x2 ] = [ b2 ] + [ w2 ]
+    // Where x1 is 'free', x2 is clamped lo or hi. L is an incrementally
+    // updated factorization of A. We compute:
+    //   x1 = inv(A) (b1 - B' x2)
+    //   w2 = B x1 + C x2 - b2
+    // BCx2 is an incrementally computed [ 0 B' ] [ 0  ]
+    //                                   [ 0 C  ] [ x2 ]
 
-    // Compute w = A*x - b. This doesn't compute elements of w that are known
-    // to be zero.
-    reducer.MultiplyA(*x, w);
-    for (int i = 0; i < n; i++) {
-      if (reducer.HasIndex(i)) {
-        (*w)[i] = 0;
-      } else {
-        (*w)[i] -= b[i];
-      }
-    }
+    // Recompute x.
+    x.head(index) = b.head(index) - BCx2.head(index);
+    LLTSolve(L, index, &x);
 
-    // Check to see if this is a solution. If not, add or remove an index from
-    // the index set and try again.
-    for (int i = 0; i < n; i++) {
-      if (reducer.HasIndex(i)) {
-        if ((*x)[i] < lo[i]) {
-          reducer.RemoveIndex(i);
-          c[i] = lo[i];
-          goto retry;
-        } else if ((*x)[i] > hi[i]) {
-          reducer.RemoveIndex(i);
-          c[i] = hi[i];
+    // Look for violations in x and w. It is important to check indexes in a
+    // consistent order otherwise we may enter cycles. We use the original
+    // (unpermuted) order.
+    wtail.resize(n - index);      // Computed incrementally
+    for (int original_i = 0; original_i < n; original_i++) {
+      int i = Aperm.PermutedIndexOf(original_i);
+      if (i < index) {
+        if (x[i] < lo[i] || x[i] > hi[i]) {
+          // Take index i out of the set.
+          x[index-1] = (x[i] < lo[i]) ? lo[i] : hi[i];
+          SwapCholeskyRows(A, i, index, &L);
+          Aperm.SwapRowsAndColumns(index-1, i);
+          std::swap(b[index-1], b[i]);
+          std::swap(lo[index-1], lo[i]);
+          std::swap(hi[index-1], hi[i]);
+          std::swap(BCx2[index-1], BCx2[i]);
+          index--;
+          // Incrementally update B'*x2 and C*x2
+          BCx2.head(index) += x[index] * A.row(index).head(index).transpose();
+          BCx2[index] = A.col(index).tail(n-index-1).dot(x.tail(n-index-1));
+          BCx2.tail(n-index) += A.col(index).tail(n-index) * x[index];
           goto retry;
         }
       } else {
-        if (c[i] == lo[i] && (*w)[i] < 0) {
-          reducer.AddIndex(i);
-          c[i] = 0;
-          goto retry;
-        } else if (c[i] == hi[i] && (*w)[i] > 0) {
-          reducer.AddIndex(i);
-          c[i] = 0;
+        // Compute w values as needed.
+        wtail[i-index] = A.row(i).head(index).dot(x.head(index))
+                         + BCx2[i] - b[i];
+        if ( (wtail[i-index] < 0 && x[i] == lo[i]) ||
+             (wtail[i-index] > 0 && x[i] == hi[i]) ) {
+          // Put index i into the set.
+          Aperm.SwapRowsAndColumns(index, i);
+          std::swap(b[index], b[i]);
+          std::swap(lo[index], lo[i]);
+          std::swap(hi[index], hi[i]);
+          std::swap(x[index], x[i]);
+          std::swap(BCx2[index], BCx2[i]);
+          AddCholeskyRow(A, index + 1, &L);
+          // Incrementally update B'*x2 and C*x2.
+          BCx2.head(index) -= x[index] * A.row(index).head(index).transpose();
+          BCx2[index] = A.col(index).tail(n-index-1).dot(x.tail(n-index-1));
+          BCx2.tail(n-index-1) -= A.col(index).tail(n-index-1) * x[index];
+          index++;
           goto retry;
         }
       }
     }
 
     // We have a correct solution.
-    return true;
+    {
+      VectorXd wret(n);
+      wret.setZero();
+      wret.tail(n - index) = wtail;
+      x_arg->resize(n);
+      w_arg->resize(n);
+      Aperm.Unpermute(x, x_arg);
+      Aperm.Unpermute(wret, w_arg);
+      return true;
+    }
    retry:;
   }
 
@@ -759,29 +663,32 @@ bool SolveLCP(const Settings &settings,
   CHECK(lo.size() == A.rows());
   CHECK(hi.size() == A.rows());
 
-  if (settings.schur_complement) {
-    if (settings.box_lcp) {
-      return SolveLCP_BoxSchur(settings, A, b, lo, hi, x, w);
-    } else {
-      Panic("Schur complement solver only available for box LCP");
-    }
+  MatrixXd Acopy;
+  if (settings.test_tolerance > 0) {
+    Acopy = A;
   }
 
-  if (settings.algorithm == MURTY) {
-    if (settings.box_lcp) {
-      return SolveLCP_BoxMurty(settings, A, b, lo, hi, x, w);
-    } else {
-      return SolveLCP_Murty(settings, A, b, x, w);
-    }
+  bool ok = false;
+  if (settings.schur_complement) {
+    ok = SolveLCP_BoxSchur(settings, A, b, lo, hi, x, w);
+  } else if (settings.algorithm == MURTY) {
+    ok = SolveLCP_BoxMurty(settings, A, b, lo, hi, x, w);
   } else if (settings.algorithm == COTTLE_DANTZIG) {
-    if (settings.box_lcp) {
-      return SolveLCP_BoxDantzig(settings, A, b, lo, hi, x, w);
-    } else {
-      Panic("Cottle Dantzig solver only available for box LCP");
-    }
+    ok = SolveLCP_BoxDantzig(settings, A, b, lo, hi, x, w);
   } else {
     Panic("Unknown LCP solver selection");
   }
+
+  if (settings.test_tolerance > 0) {
+    double error = (Acopy.selfadjointView<Eigen::Lower>() * *x - b - *w).norm();
+    CHECK(error < settings.test_tolerance);
+    for (int i = 0; i < A.rows(); i++) {
+      CHECK( (((*x)[i] >= lo[i] && (*x)[i] <= hi[i]) && (*w)[i] == 0) ||
+              ((*x)[i] == lo[i] && (*w)[i] >= 0) ||
+              ((*x)[i] == hi[i] && (*w)[i] <= 0))
+    }
+  }
+  return ok;
 }
 
 }  // namespace lcp
@@ -796,115 +703,12 @@ using Eigen::MatrixXd;
 
 const int N = 7;            // Problem sizes below
 
-TEST_FUNCTION(LinearReducer) {
-  for (int iteration = 0; iteration < 1000; iteration++) {
-    printf("Iteration %d\n", iteration);
-
-    // Create a random positive definite linear problem.
-    MatrixXd A0 = MatrixXd::Random(N,N);
-    MatrixXd A = A0*A0.transpose();
-    VectorXd b = VectorXd::Random(N,1);
-    VectorXd c = VectorXd::Random(N,1);         // Clamp vector
-    // Only pass the lower triangle of A to LinearReducer, to ensure that it
-    // only reads that.
-    MatrixXd Alower = A.triangularView<Eigen::Lower>();
-    lcp::LinearReducer lr(Alower, b);
-
-    // Set a random index set. Make sure we test the corner cases of all
-    // indexes added and all indexes removed.
-    if (iteration == 0) {
-      for (int i = 0; i < N; i++) {
-        lr.AddIndex(i);
-      }
-    } else if (iteration == 1) {
-      for (int i = 0; i < N; i++) {
-        lr.RemoveIndex(i);
-      }
-    } else {
-      for (int i = 0; i < N*2; i++) {
-        if (RandomInt(2)) {
-          lr.AddIndex(RandomInt(N));
-        } else {
-          lr.RemoveIndex(RandomInt(N));
-        }
-      }
-    }
-    printf("index_set =");
-    for (int i = 0; i < N; i++) {
-      printf(" %d", int(lr.HasIndex(i)));
-    }
-    printf("\n");
-
-    // Solve the subproblem.
-    VectorXd x;
-    lr.SubSolve(c, &x);
-
-    // Check that the solution has the requested clamp values outside the
-    // index set.
-    CHECK(x.size() == N);
-    for (int i = 0; i < N; i++) {
-      if (!lr.HasIndex(i)) {
-        CHECK(fabs(x[i] - c[i]) < 1e-10);
-      }
-    }
-
-    // Check that A*x can recover the original 'b', within the index set only.
-    VectorXd b2 = A*x;
-    for (int i = 0; i < N; i++) {
-      if (lr.HasIndex(i)) {
-        CHECK(fabs(b2[i] - b[i]) < 1e-7);
-      }
-    }
-
-    // Check MultiplyA for a random input.
-    VectorXd q = VectorXd::Random(N,1), r, good_r = A*q;
-    lr.MultiplyA(q, &r);
-    CHECK(r.size() == N);
-    for (int i = 0; i < N; i++) {
-      if (!lr.HasIndex(i)) {
-        CHECK(fabs(good_r[i] - r[i]) < 1e-10);
-      }
-    }
-  }
-  printf("Success\n");
-}
-
 TEST_FUNCTION(Murty) {
   for (int iteration = 0; iteration < 1000; iteration++) {
     // Create a random positive definite LCP problem.
     MatrixXd A0 = MatrixXd::Random(N,N);
     MatrixXd A = A0*A0.transpose();
     VectorXd b = VectorXd::Random(N,1);
-
-    {
-      // Solve the standard LCP problem. Only pass in the lower triangle of A,
-      // to ensure that the upper triangle is not read.
-      VectorXd x, w;
-      MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_Murty(lcp::Settings(), Alower, b, &x, &w));
-
-      // Check the solution.
-      for (int i = 0; i < N; i++) {
-        CHECK(x[i] >= 0);
-        CHECK(w[i] >= 0);
-        CHECK(x[i]*w[i] == 0);
-      }
-      double error = (A*x - b - w).norm();
-      printf("Error = %e\n", error);
-      CHECK(error < 1e-6);
-
-      // Solve the same problem as a box LCP problem with lo=0 and hi=infinity.
-      // We should get the same solution.
-      VectorXd lo(N), hi(N), x2, w2;
-      for (int i = 0; i < N; i++) {
-        lo[i] = 0;
-        hi[i] = __DBL_MAX__;
-      }
-      MatrixXd A2 = A;
-      CHECK(lcp::SolveLCP_BoxMurty(lcp::Settings(), A2, b, lo, hi, &x2, &w2));
-      CHECK((x-x2).norm() < 1e-10);
-      CHECK((w-w2).norm() < 1e-10);
-    }
 
     {
       VectorXd x, w, lo(N), hi(N);
@@ -924,7 +728,9 @@ TEST_FUNCTION(Murty) {
         }
       }
       MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_BoxMurty(lcp::Settings(), Alower, b, lo, hi, &x, &w));
+      lcp::Settings settings;
+      settings.test_tolerance = 1e-9;
+      CHECK(lcp::SolveLCP_BoxMurty(settings, Alower, b, lo, hi, &x, &w));
 
       // Check the solution.
       //std::cout << "x:\n" << x << "\n";
@@ -985,7 +791,9 @@ TEST_FUNCTION(Dantzig) {
       }
 
       MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_BoxDantzig(lcp::Settings(), Alower, b, lo, hi, &x, &w));
+      lcp::Settings settings;
+      settings.test_tolerance = 1e-9;
+      CHECK(lcp::SolveLCP_BoxDantzig(settings, Alower, b, lo, hi, &x, &w));
 
       // Check the solution.
       for (int i = 0; i < N; i++) {
@@ -1080,6 +888,9 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
   MatrixXd A0 = MatrixXd::Random(n, n);
   MatrixXd A = A0 * A0.transpose();
   VectorXd b = VectorXd::Random(n);
+  lcp::Settings settings;
+  settings.algorithm = lcp::COTTLE_DANTZIG;
+  settings.test_tolerance = 1e-9;
 
   const int M = 1;     // Number of repeats, for more accurate timing
 
@@ -1109,8 +920,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
       // Only pass the lower triangle of A to the solver, to ensure that the upper
       // triangle is not read.
       MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_BoxSchur(lcp::Settings(),
-                                   Alower, b, lo, hi, &x2, &w2, n));
+      CHECK(lcp::SolveLCP_BoxSchur(settings, Alower, b, lo, hi, &x2, &w2, n));
     }
     double t2 = Now();
     double error = (x2 - x).norm();
@@ -1130,8 +940,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
     double t1 = Now();
     for (int i = 0; i < M; i++) {
       MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_BoxSchur(lcp::Settings(),
-                                   Alower, b, lo, hi, &x3, &w3, n/2));
+      CHECK(lcp::SolveLCP_BoxSchur(settings, Alower, b, lo, hi, &x3, &w3, n/2));
     }
     double t2 = Now();
     double error = (x3 - x).norm();
@@ -1160,8 +969,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
     double t1 = Now();
     for (int i = 0; i < M; i++) {
       MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      CHECK(lcp::SolveLCP_BoxSchur(lcp::Settings(),
-                                   Alower, b, lo, hi, &x4, &w4));
+      CHECK(lcp::SolveLCP_BoxSchur(settings, Alower, b, lo, hi, &x4, &w4));
     }
     double t2 = Now();
     double error = (A*x4 - b - w4).norm();
@@ -1187,8 +995,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
       }
     }
     MatrixXd Alower = A.triangularView<Eigen::Lower>();
-    CHECK(lcp::SolveLCP_BoxSchur(lcp::Settings(),
-                                 Alower, b, lo, hi, &x4, &w4));
+    CHECK(lcp::SolveLCP_BoxSchur(settings, Alower, b, lo, hi, &x4, &w4));
     double error = (A*x4 - b - w4).norm();
     printf("Solve lcp, nub = %d, error = %e\n", n - nb, error);
     CHECK(error < 1e-6);

@@ -11,12 +11,13 @@
 // more details.
 
 #include "error.h"
+#include "mystring.h"
 #include "thread.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <vector>
-#include "mystring.h"
 
 using std::vector;
 
@@ -139,6 +140,15 @@ void ResetComplaints() {
     *complaint_flags[i] = false;
   }
   complaint_flags.clear();
+}
+
+//***************************************************************************
+// Time.
+
+double Now() {
+  struct timeval tp;
+  gettimeofday(&tp, 0);
+  return tp.tv_sec + tp.tv_usec * 1e-6;
 }
 
 //***************************************************************************

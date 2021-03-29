@@ -60,32 +60,24 @@ struct qtErrorHandler : public ErrorHandler {
 #endif
 
 // CHECK is like assert(), but always runs regardless of debug settings.
-#ifndef CHECK
 #define CHECK_MSG(cond, msg) if (!(cond)) \
   { Panic("Check failed: %s: %s, at %s:%d", (msg), #cond, __FILE__, __LINE__); }
 #define CHECK(cond) CHECK_MSG(cond, "")
-#endif
 
 // DBG_CHECK is like CHECK but is only used in debug builds.
-#ifndef DBG_CHECK
-  #ifdef NDEBUG
-    #define DBG_CHECK_MSG(cond)
-    #define DBG_CHECK(cond)
-  #else
-    #define DBG_CHECK_MSG(cond, msg) CHECK_MSG(cond, msg)
-    #define DBG_CHECK(cond) CHECK(cond)
-  #endif
+#ifdef NDEBUG
+  #define DBG_CHECK_MSG(cond)
+  #define DBG_CHECK(cond)
+#else
+  #define DBG_CHECK_MSG(cond, msg) CHECK_MSG(cond, msg)
+  #define DBG_CHECK(cond) CHECK(cond)
 #endif
 
 // Convenience macros to help prevent errors.
-#ifndef MUST_USE_RESULT
-  #define MUST_USE_RESULT __attribute__ ((warn_unused_result))
-#endif
-#ifndef DISALLOW_COPY_AND_ASSIGN
-  #define DISALLOW_COPY_AND_ASSIGN(TypeName) \
-    TypeName(const TypeName&); \
-    void operator=(const TypeName&)
-#endif
+#define MUST_USE_RESULT __attribute__ ((warn_unused_result))
+#define DISALLOW_COPY_AND_ASSIGN(TypeName) \
+  TypeName(const TypeName&) = delete; \
+  void operator=(const TypeName&) = delete
 #define MAY_NOT_BE_USED __attribute__((unused))
 
 // If an error occurs frequently but is redundant after the first occurence,
@@ -111,5 +103,9 @@ bool ComplaintFlagToReset(bool *flag);
 // Allow all COMPLAIN_ONCE call sites to issue new complaints. This clears all
 // flags on the reset list that was populated by ComplaintFlagToReset.
 void ResetComplaints();
+
+// Return the number of seconds since the epoch (often useful for error
+// handling).
+double Now();
 
 #endif

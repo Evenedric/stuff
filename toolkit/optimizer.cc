@@ -23,15 +23,6 @@ using std::vector;
 using Eigen::VectorXd;
 
 //***************************************************************************
-// Utility.
-
-static double Now() {
-  struct timeval tp;
-  gettimeofday(&tp, 0);
-  return tp.tv_sec + tp.tv_usec * 1e-6;
-}
-
-//***************************************************************************
 // Message passing between two threads. One thread calls Send(), the other
 // calls Receive(). Only one message is allowed to be in flight at once.
 

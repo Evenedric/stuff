@@ -217,20 +217,21 @@ bool SolveLCP_BoxMurty(const Settings &settings,
                        const VectorXd &lo_arg, const VectorXd &hi_arg,
                        VectorXd *x_arg, VectorXd *w_arg) {
   // If lo=0 and hi=infinity this code can be simplified quite a bit, and
-  // the x update at the start of each iteration can be twice as fast by
+  // the x update at the start of each iteration can be made twice as fast by
   // observing that if we add a row/column to an A x = b problem:
   //   [ A  a ] [ x1 ] = [ L  0 ] [ L' l ] [ x1 ] = [ b1 ]
   //   [ a' c ] [ x2 ] = [ l' e ] [ 0  e ] [ x2 ]   [ b2 ]
   // and we know oldx1 = inv(A) b1, the x1,x2 can be computed from
   //   x2 = (b2 - a' oldx1) / e^2
   //   x1 = oldx1 - inv(L') l x2
-  // (and similarly for removing a row/column). This speeds things up a little,
-  // but the result is still not competitive with BoxDantzig, so we don't
-  // actually implement this.
+  // (and similarly for removing a row/column). This trick speeds things up the
+  // entire solve a little, but the result is still not competitive with
+  // BoxDantzig, so we don't bother to implement this.
   //
   // This can not handle unbounded variables with lo=-infinity and hi=infinity,
   // because of the way that x is initialized. It is assumed that unbounded
-  // variables will be handled with a Schur complement method.
+  // variables will be handled with a Schur complement that wraps around this
+  // function.
 
   int n = A.rows();
 
@@ -248,8 +249,8 @@ bool SolveLCP_BoxMurty(const Settings &settings,
   // Indexes index..i-1 are where w can take any value and x is clamped.
   int index = 0;
 
-  // Initialize x. We can not put 'infinity' values here because they will
-  // multiply other things and cause a mess.
+  // Initialize x. We can not put 'infinity' values in x because they will be
+  // multiplied with other things later and cause a mess.
   VectorXd x(n);
   for (int i = 0; i < n; i++) {
     if (lo[i] > -__DBL_MAX__)
@@ -280,10 +281,13 @@ bool SolveLCP_BoxMurty(const Settings &settings,
     // Look for violations in x and w. It is important to check indexes in a
     // consistent order otherwise we may enter cycles. We use the original
     // (unpermuted) order.
-    wtail.resize(n - index);      // Computed incrementally
+    wtail.resize(n - index);  // Tail of w vector, computed incrementally
+    const int wsz = 16;        // blocks in wtail of this size computed together
+    vector<bool> wvalid((n-index)/wsz + 1);  // Which blocks in wtail valid
     for (int original_i = 0; original_i < n; original_i++) {
       int i = Aperm.PermutedIndexOf(original_i);
       if (i < index) {
+        // Check an x value.
         if (x[i] < lo[i] || x[i] > hi[i]) {
           // Take index i out of the set.
           x[index-1] = (x[i] < lo[i]) ? lo[i] : hi[i];
@@ -301,9 +305,21 @@ bool SolveLCP_BoxMurty(const Settings &settings,
           goto retry;
         }
       } else {
-        // Compute w values as needed.
-        wtail[i-index] = A.row(i).head(index).dot(x.head(index))
-                         + BCx2[i] - b[i];
+        // Check a w value. Compute w values as needed. We could compute them
+        // one by one like this:
+        //     wtail[i-index] = A.row(i).head(index).dot(x.head(index))
+        //                      + BCx2[i] - b[i];
+        // But that is quite slow because of repeated data movement. Instead
+        // blocks of w are computed together for efficiency.
+        int wblk = (i - index) / wsz;   // Block number in wtail
+        if (!wvalid.at(wblk)) {
+          wvalid[wblk] = true;
+          int j = wblk * wsz;           // Starting index in wtail
+          int length = std::min(wsz, (n - index) - j);
+          wtail.segment(j, length) =
+            A.block(j+index, 0, length, index) * x.head(index)
+            + BCx2.segment(j+index, length) - b.segment(j+index, length);
+        }
         if ( (wtail[i-index] < 0 && x[i] == lo[i]) ||
              (wtail[i-index] > 0 && x[i] == hi[i]) ) {
           // Put index i into the set.
@@ -379,7 +395,8 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
 
     // Check if LCP conditions for index i are already satisfied.
     if (w[i] == 0) {
-      // Degenerate case.
+      // A rare case. x=0 and w=0 is guaranteed to satisfy LCP because we have
+      // lo <= 0 and hi >= 0.
       continue;
     } else if (lo[i] == 0 & w[i] >= 0) {
       continue;   // Because x is already at the lo value
@@ -663,32 +680,43 @@ bool SolveLCP(const Settings &settings,
   CHECK(lo.size() == A.rows());
   CHECK(hi.size() == A.rows());
 
-  MatrixXd Acopy;
-  if (settings.test_tolerance > 0) {
-    Acopy = A;
-  }
-
-  bool ok = false;
   if (settings.schur_complement) {
-    ok = SolveLCP_BoxSchur(settings, A, b, lo, hi, x, w);
+    return SolveLCP_BoxSchur(settings, A, b, lo, hi, x, w);
   } else if (settings.algorithm == MURTY) {
-    ok = SolveLCP_BoxMurty(settings, A, b, lo, hi, x, w);
+    return SolveLCP_BoxMurty(settings, A, b, lo, hi, x, w);
   } else if (settings.algorithm == COTTLE_DANTZIG) {
-    ok = SolveLCP_BoxDantzig(settings, A, b, lo, hi, x, w);
+    return SolveLCP_BoxDantzig(settings, A, b, lo, hi, x, w);
   } else {
     Panic("Unknown LCP solver selection");
   }
+}
 
-  if (settings.test_tolerance > 0) {
-    double error = (Acopy.selfadjointView<Eigen::Lower>() * *x - b - *w).norm();
-    CHECK(error < settings.test_tolerance);
-    for (int i = 0; i < A.rows(); i++) {
-      CHECK( (((*x)[i] >= lo[i] && (*x)[i] <= hi[i]) && (*w)[i] == 0) ||
-              ((*x)[i] == lo[i] && (*w)[i] >= 0) ||
-              ((*x)[i] == hi[i] && (*w)[i] <= 0))
+double CheckLCP(MatrixXd &A, const VectorXd &b,
+                const VectorXd &lo, const VectorXd &hi,
+                const VectorXd &x, const VectorXd &w,
+                double tolerance) {
+  double error = (A.selfadjointView<Eigen::Lower>() * x - b - w).norm();
+  if (error > tolerance) {
+    Panic("LCP error, norm=%g (> %g)", error, tolerance);
+  }
+  for (int i = 0; i < A.rows(); i++) {
+    if (x[i] < lo[i]) {
+      Panic("x[%d] < lo (%g < %g)", i, x[i], lo[i]);
+    } else if (x[i] > hi[i]) {
+      Panic("x[%d] > hi (%g > %g)", i, x[i], hi[i]);
+    } else if (x[i] == lo[i]) {
+      if (w[i] < 0) {
+        Panic("x[%d] == lo but w = %g (should be >= 0)", i, w[i]);
+      }
+    } else if (x[i] == hi[i]) {
+      if (w[i] > 0) {
+        Panic("x[%d] == lo but w = %g (should be <= 0)", i, w[i]);
+      }
+    } else if (w[i] != 0) {
+      Panic("lo < x[%d] < hi but w = %g (should be 0)", i, w[i]);
     }
   }
-  return ok;
+  return error;
 }
 
 }  // namespace lcp
@@ -701,117 +729,11 @@ namespace {
 using Eigen::VectorXd;
 using Eigen::MatrixXd;
 
-const int N = 7;            // Problem sizes below
-
-TEST_FUNCTION(Murty) {
-  for (int iteration = 0; iteration < 1000; iteration++) {
-    // Create a random positive definite LCP problem.
-    MatrixXd A0 = MatrixXd::Random(N,N);
-    MatrixXd A = A0*A0.transpose();
-    VectorXd b = VectorXd::Random(N,1);
-
-    {
-      VectorXd x, w, lo(N), hi(N);
-
-      // Solve a box LCP problem with random lo and hi vectors. Only pass in
-      // the lower triangle of A, to ensure that the upper triangle is not
-      // read.
-      for (int i = 0; i < N; i++) {
-        lo[i] = -RandomDouble() * 10.0;
-        hi[i] = +RandomDouble() * 10.0;
-        // Occasionally make lo or hi equal to zero.
-        int r = RandomInt(100);
-        if (r == 0) {
-          lo[i] = 0;
-        } else if (r == 1) {
-          hi[i] = 0;
-        }
-      }
-      MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      lcp::Settings settings;
-      settings.test_tolerance = 1e-9;
-      CHECK(lcp::SolveLCP_BoxMurty(settings, Alower, b, lo, hi, &x, &w));
-
-      // Check the solution.
-      //std::cout << "x:\n" << x << "\n";
-      //std::cout << "w:\n" << w << "\n";
-      for (int i = 0; i < N; i++) {
-        CHECK( ((x[i] >= lo[i] && x[i] <= hi[i]) && w[i] == 0) ||
-               (x[i] == lo[i] && w[i] >= 0) ||
-               (x[i] == hi[i] && w[i] <= 0))
-      }
-      double error = (A*x - b - w).norm();
-      printf("Error = %e\n", error);
-      CHECK(error < 1e-6);
-    }
-  }
-  printf("Success\n");
-}
-
-TEST_FUNCTION(Dantzig) {
-  for (int iteration = 0; iteration < 1000; iteration++) {
-    // Create a random positive definite LCP problem.
-    MatrixXd A0 = MatrixXd::Random(N,N);
-    MatrixXd A = A0*A0.transpose();
-    A += MatrixXd::Identity(N, N) * 0.001;   // Stabilize condition number
-    VectorXd b = VectorXd::Random(N,1);
-
-    {
-      VectorXd x, w, lo(N), hi(N);
-
-      // Solve a box LCP problem with random lo and hi vectors. Only pass in
-      // the lower triangle of A, to ensure that the upper triangle is not
-      // read.
-
-      // Test problem variants.
-      double lo_range = 10;
-      double hi_range = 10;
-      switch (iteration % 6) {
-        case 0: break;
-        case 1: lo_range *= 10;  hi_range *= 10;  break;
-        case 2: lo_range = 1e99; hi_range = 1e99; break;
-        case 3: lo_range *= 0.1; hi_range *= 0.1; break;
-        case 4: lo_range = 0; break;
-        case 5: hi_range = 0; break;
-      }
-
-      for (int i = 0; i < N; i++) {
-        lo[i] = -RandomDouble() * lo_range;
-        hi[i] = +RandomDouble() * hi_range;
-        // Occasionally make lo or hi equal to zero (but avoid the case
-        // lo=hi=0).
-        int r = RandomInt(100);
-        if (r == 0) {
-          if (hi[i] != 0)
-            lo[i] = 0;
-        } else if (r == 1) {
-          if (lo[i] != 0)
-            hi[i] = 0;
-        }
-      }
-
-      MatrixXd Alower = A.triangularView<Eigen::Lower>();
-      lcp::Settings settings;
-      settings.test_tolerance = 1e-9;
-      CHECK(lcp::SolveLCP_BoxDantzig(settings, Alower, b, lo, hi, &x, &w));
-
-      // Check the solution.
-      for (int i = 0; i < N; i++) {
-        CHECK( ((x[i] >= lo[i] && x[i] <= hi[i]) && w[i] == 0) ||
-               (x[i] == lo[i] && w[i] >= 0) ||
-               (x[i] == hi[i] && w[i] <= 0))
-      }
-      double error = (A*x - b - w).norm();
-      printf("Error = %e\n", error);
-      CHECK(error < 1e-6);
-    }
-  }
-  printf("Success\n");
-}
+const int N = 50;  // Problem sizes below
 
 TEST_FUNCTION(Cholesky) {
   MatrixXd A0 = MatrixXd::Random(N,N);
-  MatrixXd A = A0 * A0.transpose();
+  MatrixXd A = A0 * A0.transpose() + 0.001 * MatrixXd::Identity(N, N);
   Eigen::LLT<MatrixXd> llt(A);
   lcp::Cholesky(&A);
   MatrixXd L1 = llt.matrixL();
@@ -821,17 +743,17 @@ TEST_FUNCTION(Cholesky) {
   CHECK(error < 1e-10);
 }
 
-TEST_FUNCTION(LSolve) {
-  for (int n = 1; n < N; n++) {
+TEST_FUNCTION(LLTSolve) {
+  for (int n = 1; n <= N; n++) {
     // Form a triangular L and right hand side b
     MatrixXd A0 = MatrixXd::Random(N,N);
-    MatrixXd A = A0 * A0.transpose();
+    MatrixXd A = A0 * A0.transpose() + 0.001 * MatrixXd::Identity(N, N);
     MatrixXd L = A.triangularView<Eigen::Lower>();
     lcp::Cholesky(&L);
     VectorXd b = MatrixXd::Random(n, 1);
     VectorXd x = b;
-    lcp::LSolve(L, n, &x);
-    double error = (L.block(0, 0, n, n)*x - b).norm();
+    lcp::LLTSolve(L, n, &x);
+    double error = (A.block(0, 0, n, n)*x - b).norm();
     printf("Error = %e\n", error);
     CHECK(error < 1e-10);
   }
@@ -841,7 +763,7 @@ TEST_FUNCTION(AddCholeskyRow) {
   for (int n = 1; n <= N; n++) {
     // Form a positive definite A, factor, and then add a row.
     MatrixXd A0 = MatrixXd::Random(N,N);
-    MatrixXd A = A0 * A0.transpose();
+    MatrixXd A = A0 * A0.transpose() + 0.001 * MatrixXd::Identity(N, N);
     MatrixXd L = A.triangularView<Eigen::Lower>();
     lcp::Cholesky(&L);
     MatrixXd Loriginal = L;
@@ -859,7 +781,7 @@ TEST_FUNCTION(SwapCholeskyRows) {
     for (int n = 0; n < N; n++) {
       // Form a positive definite A, factor, and then remove a row/column.
       MatrixXd A0 = MatrixXd::Random(sz, sz);
-      MatrixXd A = A0 * A0.transpose();
+      MatrixXd A = A0 * A0.transpose() + 0.001 * MatrixXd::Identity(sz, sz);
       Eigen::LLT<MatrixXd> llt(A);
       MatrixXd L = llt.matrixL();
       MatrixXd Lorig = L;
@@ -875,10 +797,85 @@ TEST_FUNCTION(SwapCholeskyRows) {
       printf("Removing row/col %d, error = %e\n", n, error);
       CHECK(error < 1e-9);
 
-      // Check the parts of L that should not have been touched.
-      if (sz > N) {
-        CHECK(L.block(N, 0, sz-N, sz) == Lorig.block(N, 0, sz-N, sz))
+      // Check the parts of L that should not have been touched. This includes
+      // the last row of the original factorization, since this is not a true
+      // swap.
+      CHECK(L.block(N-1, 0, sz-N+1, sz) == Lorig.block(N-1, 0, sz-N+1, sz));
+    }
+  }
+}
+
+TEST_FUNCTION(BoxLCP) {
+  for (int iteration = 0; iteration < 100; iteration++) {
+    // Create a random positive definite LCP problem.
+    MatrixXd A0 = MatrixXd::Random(N,N);
+    MatrixXd A = A0*A0.transpose();
+    A += MatrixXd::Identity(N, N) * 0.001;   // Stabilize condition number
+    VectorXd b = VectorXd::Random(N,1), x, w, lo(N), hi(N);
+
+    // Test problem variants with different random lo and hi.
+    int variant = iteration % 7;
+    for (int i = 0; i < N; i++) {
+      if (variant == 0) {
+        lo[i] = -RandomDouble() * 10;
+        hi[i] = +RandomDouble() * 10;
+      } else if (variant == 1) {
+        lo[i] = -RandomDouble() * 100;
+        hi[i] = +RandomDouble() * 100;
+      } else if (variant == 2) {
+        lo[i] = -RandomDouble() * 1;
+        hi[i] = +RandomDouble() * 1;
+      } else if (variant == 3) {
+        lo[i] = 0;
+        hi[i] = +RandomDouble() * 10;
+      } else if (variant == 4) {
+        lo[i] = -RandomDouble() * 10;
+        hi[i] = 0;
+      } else if (variant == 5) {
+        lo[i] = -__DBL_MAX__;
+        hi[i] = __DBL_MAX__;
+      } else if (variant == 6) {
+        lo[i] = 0;
+        hi[i] = __DBL_MAX__;
       }
+    }
+
+    // Occasionally make lo or hi equal to zero (but avoid the case lo=hi=0).
+    for (int i = 0; i < N; i++) {
+      int r = RandomInt(100);
+      if (r == 0) {
+        if (hi[i] != 0)
+          lo[i] = 0;
+      } else if (r == 1) {
+        if (lo[i] != 0)
+          hi[i] = 0;
+      }
+    }
+
+    // Only pass in the lower triangle of A, to ensure that the upper triangle
+    // is not read.
+    {
+      MatrixXd Alower = A.triangularView<Eigen::Lower>();
+      double start = Now();
+      CHECK(lcp::SolveLCP_BoxDantzig(lcp::Settings(),
+                                     Alower, b, lo, hi, &x, &w));
+      double end = Now();
+      double error = lcp::CheckLCP(A, b, lo, hi, x, w, 1e-9);
+      int wcount = 0;
+      for (int i = 0; i < N; i++) {
+        if (w[i] != 0) wcount++;
+      }
+      printf("Dantzig %d: Error = %e, Time = %f (w density = %f)\n",
+             iteration, error, end - start, double(wcount) / N);
+    }
+    if (variant != 5) {
+      MatrixXd Alower = A.triangularView<Eigen::Lower>();
+      double start = Now();
+      CHECK(lcp::SolveLCP_BoxMurty(lcp::Settings(), Alower, b, lo, hi, &x, &w));
+      double end = Now();
+      double error = lcp::CheckLCP(A, b, lo, hi, x, w, 1e-9);
+      printf("Murty   %d. Error = %e, Time = %f\n", iteration, error,
+             end - start);
     }
   }
 }
@@ -886,11 +883,10 @@ TEST_FUNCTION(SwapCholeskyRows) {
 TEST_FUNCTION(SolveLCP_BoxSchur) {
   const int n = 20;
   MatrixXd A0 = MatrixXd::Random(n, n);
-  MatrixXd A = A0 * A0.transpose();
+  MatrixXd A = A0 * A0.transpose() + 0.001 * MatrixXd::Identity(n, n);
   VectorXd b = VectorXd::Random(n);
   lcp::Settings settings;
   settings.algorithm = lcp::COTTLE_DANTZIG;
-  settings.test_tolerance = 1e-9;
 
   const int M = 1;     // Number of repeats, for more accurate timing
 
@@ -906,7 +902,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
     }
     double t2 = Now();
     double error = (A*x - b).norm();
-    printf("Full solve,            time = %f, error = %e\n", (t2-t1)/M, error);
+    printf("Full solve,     time = %f, error = %e\n", (t2-t1)/M, error);
     CHECK(error < 1e-6);
   }
 
@@ -973,7 +969,7 @@ TEST_FUNCTION(SolveLCP_BoxSchur) {
     }
     double t2 = Now();
     double error = (A*x4 - b - w4).norm();
-    printf("Solve lcp,  time = %f, error = %e\n", (t2-t1)/M, error);
+    printf("Solve lcp,      time = %f, error = %e\n", (t2-t1)/M, error);
     CHECK(error < 1e-6);
     for (int i = 0; i < n; i++) {
       CHECK(x4[i] >= lo[i] && x4[i] <= hi[i]);

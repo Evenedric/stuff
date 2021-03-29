@@ -116,10 +116,6 @@ struct Settings {
   // of unbounded variables are present (i.e. lo=-infinity, hi=infinity).
   bool schur_complement = true;
 
-  // If nonzero, the LCP result will be checked for correctness to this
-  // tolerance.
-  double test_tolerance = 0;
-
   // Maximum number of solver iterations to run before giving up and returning
   // false. However it is often not possible to know what a reasonable limit
   // might be, which is why max_time also exists.
@@ -134,6 +130,13 @@ struct Settings {
 bool SolveLCP(const Settings &settings, MatrixXd &A, const VectorXd &b,
               const VectorXd &lo, const VectorXd &hi,
               VectorXd *x, VectorXd *w) MUST_USE_RESULT;
+
+// Check the solution to an LCP problem, to the given tolerance. Panic() if any
+// errors are found.
+double CheckLCP(MatrixXd &A, const VectorXd &b,
+                const VectorXd &lo, const VectorXd &hi,
+                const VectorXd &x, const VectorXd &w,
+                double tolerance);
 
 }  // namespace lcp
 

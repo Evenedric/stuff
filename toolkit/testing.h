@@ -20,6 +20,10 @@ namespace testing {
   // Run all unit tests.
   void RunAll();
 
+  // Process the command line arguments looking for flags of the form
+  // "-runtest=name". If any are found, run only those tests.
+  void ProcessCommandLineArguments(int argc, char **argv);
+
   // Internal function called by TEST_FUNCTION.
   void __RegisterTest(void (*fn)(), const char *name,
                       const char *filename, int line_number);

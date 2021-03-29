@@ -61,7 +61,7 @@ class PushShader {
 };
 
 // Catch bug where a PushShader variable name is omitted
-#define PushShader(x) COMPILE_ASSERT(0, PushShader_missing_variable_name)
+#define PushShader(x) static_assert(0, "PushShader missing variable name");
 
 // A simple shader with a constant color (via a uniform vec3 called "color").
 Shader &FlatShader();

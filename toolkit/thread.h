@@ -32,7 +32,7 @@ class MutexLock {
 };
 
 // Catch bug where variable name is omitted, e.g. MutexLock(&mu);
-#define MutexLock(x) COMPILE_ASSERT(0, mutex_lock_decl_missing_var_name)
+#define MutexLock(x) static_assert(0, "MutexLock missing variable name");
 
 // Run the function 'fn' from 'n' threads with integer arguments in the range
 // [first..last].

@@ -36,6 +36,6 @@ class Trace {
 void TraceReport(std::string *report);
 
 // Catch bug where variable name is omitted, e.g. Trace("foo");
-#define Trace(x) COMPILE_ASSERT(0, trace_decl_missing_var_name)
+#define Trace(x) static_assert(0, "Trace missing variable name");
 
 #endif

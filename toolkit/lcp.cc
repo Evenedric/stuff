@@ -390,7 +390,7 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
   for (int i = 0; i < n; i++) {
     // Thus far we have not even been computing the w values for indexes >= i,
     // so compute w[i] and x[i] now.
-    w[i] = A.row(i).head(i).dot(x.head(i)) - b[i];
+    w[i] = A.row(i).head(i).dot(x.head(i)) - b[i];  // wi = AiS xS + AiN xN - bi
     x[i] = 0;
 
     // Check if LCP conditions for index i are already satisfied.
@@ -404,7 +404,7 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
       continue;   // Because x is already at the hi value
     }
 
-    // Find the direction to push on x[i]: delta_xS = -dir*inv(ASS)*AiS
+    // Find the direction to push on x[i]: delta_xS = -dir*inv(ASS)*AiS'
     double dir = (w[i] <= 0) ? 1 : -1;
     VectorXd delta_xS = -dir * A.block(i, 0, 1, index).transpose();
     LLTSolve(L, index, &delta_xS);
@@ -413,9 +413,9 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
     while (true) {
       // Push x[i] and w[i] to hit one of the three lines.
       // Calculate delta_w = A*delta_x, except that we don't need to calculate
-      // the parts of delta_w that are going to be zero anyway.
-      VectorXd delta_wNS = A.block(index, 0, i-index, index) * delta_xS +
-                           A.block(i, index, 1, i-index).transpose() * dir;
+      // the delta_wS which is constrained to be zero.
+      VectorXd delta_wN = A.block(index, 0, i-index, index) * delta_xS +
+                          A.block(i, index, 1, i-index).transpose() * dir;
       double delta_wi = A.row(i).head(index).dot(delta_xS) + A(i, i) * dir;
 
       // Find the largest step we can take for index i.
@@ -451,7 +451,7 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
         // For this index we could have stepped to w=0 in a previous iteration,
         // so we should be careful not to take the spurious step w=0 --> w=0
         // (the alpha > 0 requirement).
-        double alpha = -w[j] / delta_wNS[j-index];
+        double alpha = -w[j] / delta_wN[j-index];
         if (alpha > 0 && alpha < best_alpha) {
           best_alpha = alpha;
           best_index = j;
@@ -463,7 +463,7 @@ bool SolveLCP_BoxDantzig(const Settings &settings,
       // Do the step. Only modify the x,w values that are allowed to change.
       x.head(index) += best_alpha * delta_xS;
       x[i] += best_alpha * delta_xi;
-      w.segment(index, i-index) += best_alpha * delta_wNS;
+      w.segment(index, i-index) += best_alpha * delta_wN;
       w[i] += best_alpha * delta_wi;
 
       // Modify the factorization.

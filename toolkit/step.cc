@@ -565,7 +565,7 @@ static void Validate(const Parser::Database &database) {
           //     .UNSPECIFIED.,             // curve_form
           //     .F.,                       // closed_curve
           //     .F.,                       // self_intersect
-          //     (knot_multiplicity_list),  // 4 at ends, 1 or 2 in middle
+          //     (knot_multiplicity_list),  // 4 at ends, 1,2,3 in middle
           //     (knot_position_list),      // Knot positions (0..1)
           //     .UNSPECIFIED.);            // knot_spec
           //
@@ -582,7 +582,7 @@ static void Validate(const Parser::Database &database) {
             int multiplicity = geom.numbers[1 + j];
             bool at_end = (j == 0 || j == N-1);
             if (!( (at_end && multiplicity == 4) ||
-                   (!at_end && (multiplicity == 1 || multiplicity == 2)) )) {
+                   (!at_end && (multiplicity >= 1 && multiplicity <= 3)) )) {
               throw Exception("B_SPLINE_CURVE_WITH_KNOTS invalid (2)",
                                 edge_curve.refs[2]);
             }
